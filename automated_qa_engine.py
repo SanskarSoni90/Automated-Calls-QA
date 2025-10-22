@@ -46,16 +46,12 @@ GSPREAD_CREDENTIALS = os.environ.get("GSPREAD_CREDENTIALS")
 EXOTEL_SUBDOMAIN = "api.exotel.com"
 
 # Google Sheet Configuration
-SHEET_NAME = "Professional QA Analysis Log"
+SHEET_ID = "1oYtYT7HkvpHL9fjHxf9upzFKzuNlrdh39d65sJM-c1U"  # Your specific sheet
+SHEET_NAME = None  # Will open by ID instead of name
 
-# Timezone Configuration (change this to your timezone)
-# Common options:
-# - IST (India): UTC+5:30 -> timedelta(hours=5, minutes=30)
-# - EST (US East): UTC-5 -> timedelta(hours=-5)
-# - PST (US West): UTC-8 -> timedelta(hours=-8)
-# - GMT (UK): UTC+0 -> timedelta(hours=0)
-TIMEZONE_OFFSET = timedelta(hours=5, minutes=30)  # IST by default
-TIMEZONE_NAME = "IST"  # Timezone name for display
+# Timezone Configuration
+TIMEZONE_OFFSET = timedelta(hours=5, minutes=30)  # IST
+TIMEZONE_NAME = "IST"
 
 def get_local_time() -> datetime:
     """Get current time in configured timezone"""
@@ -149,6 +145,107 @@ def get_kb_context() -> str:
     return fetch_google_doc_content(doc_id)
 
 
+def ensure_sheet_headers(sheet):
+    """Ensure the sheet has proper headers, create them if missing"""
+    try:
+        # Check if headers exist
+        existing_headers = sheet.row_values(1)
+        
+        # Define complete header structure
+        headers = [
+            "Analysis Timestamp",
+            "Call SID",
+            "Call Date",
+            "Start Time",
+            "End Time",
+            "Duration (seconds)",
+            "From Number",
+            "To Number",
+            "Status",
+            "Direction",
+            "Answered By",
+            "Price",
+            "Recording URL",
+            "Total Score",
+            "Score Percentage",
+            "Performance Level",
+            "Conversation Tone",
+            "Languages",
+            "Unanswered Questions",
+            "Emotional Arc",
+        ]
+        
+        # Add headers for each rubric parameter (4 columns each)
+        rubric_params = [
+            "Call Opening",
+            "Call Closing",
+            "Technically/Legally Correct",
+            "All Questions Addressed",
+            "Expectation Setting",
+            "Process Adherence",
+            "Vocabulary/Grammar/Pronunciation",
+            "Fillers/Fumbling/Clarity",
+            "Energy/Tone/Modulation",
+            "Active Listening/Interruptions",
+            "Simplifying Answers",
+            "Empathy"
+        ]
+        
+        for param in rubric_params:
+            headers.extend([
+                f"{param} - Score",
+                f"{param} - Justification",
+                f"{param} - Transcript Quote",
+                f"{param} - KB Recommended Answer"
+            ])
+        
+        # Add final column
+        headers.append("Full Transcript")
+        
+        # If no headers or incomplete headers, set them
+        if not existing_headers or len(existing_headers) < len(headers):
+            logger.info("📋 Setting up sheet headers...")
+            sheet.update('A1', [headers], value_input_option='USER_ENTERED')
+            
+            # Format header row (bold, freeze)
+            sheet.format('A1:ZZ1', {
+                "textFormat": {"bold": True},
+                "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9}
+            })
+            sheet.freeze(rows=1)
+            
+            logger.info(f"✅ Headers created: {len(headers)} columns")
+        else:
+            logger.info(f"✅ Headers already exist: {len(existing_headers)} columns")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error setting up headers: {e}")
+        traceback.print_exc()
+        return False
+
+
+def get_already_processed_calls(sheet) -> set:
+    """Get set of already processed Call SIDs from Google Sheet"""
+    try:
+        # Get all values from column B (Call SID column, row 1 is header)
+        all_values = sheet.col_values(2)
+        
+        # Skip header (row 1) and get unique SIDs
+        if len(all_values) > 1:
+            processed_sids = set(all_values[1:])  # Skip header
+            logger.info(f"Found {len(processed_sids)} already processed calls")
+            return processed_sids
+        else:
+            logger.info("No processed calls found (sheet is empty or only has headers)")
+            return set()
+            
+    except Exception as e:
+        logger.warning(f"Could not fetch processed calls: {e}")
+        return set()
+
+
 def fetch_last_hour_recordings() -> List[Dict[str, Any]]:
     """Fetch all recordings from the last hour"""
     try:
@@ -170,12 +267,13 @@ def fetch_last_hour_recordings() -> List[Dict[str, Any]]:
             "PageSize": 100,
             "DateCreated": date_filter,
             "SortBy": "DateCreated:desc",
-            "Status": "completed"  # Only fetch completed calls
+            "Status": "completed"
         }
         
         all_calls = []
+        seen_sids = set()  # FIX: Track unique Call SIDs
         page = 0
-        max_pages = 50  # Safety limit
+        max_pages = 50
         
         while page < max_pages:
             params["Page"] = page
@@ -197,14 +295,16 @@ def fetch_last_hour_recordings() -> List[Dict[str, Any]]:
             if not calls:
                 break
             
-            # Filter calls with recordings
-            calls_with_recordings = [
-                call for call in calls 
-                if call.get("RecordingUrl") or call.get("PreSignedRecordingUrl")
-            ]
+            # FIX: Filter calls with recordings AND deduplicate by SID
+            for call in calls:
+                call_sid = call.get("Sid")
+                has_recording = call.get("RecordingUrl") or call.get("PreSignedRecordingUrl")
+                
+                if has_recording and call_sid and call_sid not in seen_sids:
+                    all_calls.append(call)
+                    seen_sids.add(call_sid)
             
-            all_calls.extend(calls_with_recordings)
-            logger.info(f"Fetched {len(calls_with_recordings)} calls with recordings from page {page}")
+            logger.info(f"Page {page}: Found {len(calls)} calls, {len(all_calls)} unique with recordings so far")
             
             # Check if there are more pages
             metadata = data.get("Metadata", {})
@@ -213,7 +313,7 @@ def fetch_last_hour_recordings() -> List[Dict[str, Any]]:
             
             page += 1
         
-        logger.info(f"✅ Total recordings fetched: {len(all_calls)}")
+        logger.info(f"✅ Total unique recordings fetched: {len(all_calls)}")
         return all_calls
         
     except Exception as e:
@@ -307,6 +407,12 @@ def polish_transcript(raw_transcript: str, kb_context: str) -> str:
         if not OPENAI_CLIENT or not raw_transcript:
             return raw_transcript
         
+        # FIX: Truncate transcript if too long to fit within token limits
+        max_transcript_chars = 8000  # Conservative limit
+        if len(raw_transcript) > max_transcript_chars:
+            logger.warning(f"Transcript too long ({len(raw_transcript)} chars), truncating to {max_transcript_chars}")
+            raw_transcript = raw_transcript[:max_transcript_chars] + "\n[...truncated...]"
+        
         prompt = f"""Polish this customer service call transcript for readability while preserving company-specific terminology.
 
 KNOWLEDGE BASE for correct terminology:
@@ -323,9 +429,10 @@ RAW TRANSCRIPT:
 {raw_transcript}
 """
         
+        # FIX: Reduced max_tokens from 8000 to 4000 (within GPT-4-turbo limit)
         response = OPENAI_CLIENT.chat.completions.create(
             model=ANALYSIS_MODEL,
-            max_tokens=8000,
+            max_tokens=4000,  # FIXED: Was 8000, now 4000
             temperature=0.1,
             messages=[{"role": "user", "content": prompt}]
         )
@@ -446,7 +553,17 @@ def log_to_google_sheet(call_data: Dict[str, Any], analysis_data: Dict[str, Any]
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         client = gspread.authorize(creds)
         
-        sheet = client.open(SHEET_NAME).sheet1
+        # FIX: Better error handling for sheet access - Open by ID
+        try:
+            sheet = client.open_by_key(SHEET_ID).sheet1
+            
+            # Ensure headers exist
+            ensure_sheet_headers(sheet)
+            
+        except gspread.exceptions.SpreadsheetNotFound:
+            logger.error(f"❌ Spreadsheet with ID '{SHEET_ID}' not found. Please check sharing permissions.")
+            logger.error(f"   Make sure the service account email has Editor access to the sheet.")
+            raise
         
         # Get current local time for analysis timestamp
         current_time = get_local_time()
@@ -458,37 +575,34 @@ def log_to_google_sheet(call_data: Dict[str, Any], analysis_data: Dict[str, Any]
                 return 'N/A'
             
             try:
-                # Exotel returns timestamps - parse and add timezone label
                 dt = datetime.strptime(str(exotel_timestamp).strip(), '%Y-%m-%d %H:%M:%S')
                 return dt.strftime('%Y-%m-%d %H:%M:%S') + f' {TIMEZONE_NAME}'
-                
             except Exception as e:
                 logger.warning(f"Timestamp conversion failed for {exotel_timestamp}: {e}")
-                # Return as-is with timezone label
                 return str(exotel_timestamp) + f' {TIMEZONE_NAME}'
         
         # Prepare comprehensive row data with IST timestamps
         row = [
-            format_ist_timestamp(current_time),  # Analysis Timestamp (IST)
-            call_data.get('Sid', ''),  # Call SID
-            convert_to_ist(call_data.get('DateCreated', '')),  # Call Date (IST)
-            convert_to_ist(call_data.get('StartTime', '')),  # Start Time (IST)
-            convert_to_ist(call_data.get('EndTime', '')),  # End Time (IST)
-            call_data.get('Duration', ''),  # Duration (seconds)
+            format_ist_timestamp(current_time),
+            call_data.get('Sid', ''),
+            convert_to_ist(call_data.get('DateCreated', '')),
+            convert_to_ist(call_data.get('StartTime', '')),
+            convert_to_ist(call_data.get('EndTime', '')),
+            call_data.get('Duration', ''),
             call_data.get('From', {}).get('PhoneNumber', '') if isinstance(call_data.get('From'), dict) else call_data.get('From', ''),
             call_data.get('To', {}).get('PhoneNumber', '') if isinstance(call_data.get('To'), dict) else call_data.get('To', ''),
-            call_data.get('Status', ''),  # Call Status
-            call_data.get('Direction', ''),  # Direction
-            call_data.get('AnsweredBy', ''),  # Answered By
-            call_data.get('Price', ''),  # Price
-            call_data.get('RecordingUrl', ''),  # Recording URL
-            analysis_data.get('total_score', ''),  # Total Score
-            f"{(analysis_data.get('total_score', 0) / MAX_SCORE * 100):.1f}%",  # Score Percentage
-            analysis_data.get('performance_level', ''),  # Performance Level
-            analysis_data.get('conversation_tone', ''),  # Conversation Tone
-            ', '.join(analysis_data.get('detected_languages', [])),  # Languages
-            ', '.join(analysis_data.get('unanswered_questions', [])),  # Unanswered Questions
-            analysis_data.get('emotional_arc', ''),  # Emotional Arc
+            call_data.get('Status', ''),
+            call_data.get('Direction', ''),
+            call_data.get('AnsweredBy', ''),
+            call_data.get('Price', ''),
+            call_data.get('RecordingUrl', ''),
+            analysis_data.get('total_score', ''),
+            f"{(analysis_data.get('total_score', 0) / MAX_SCORE * 100):.1f}%",
+            analysis_data.get('performance_level', ''),
+            analysis_data.get('conversation_tone', ''),
+            ', '.join(analysis_data.get('detected_languages', [])),
+            ', '.join(analysis_data.get('unanswered_questions', [])),
+            analysis_data.get('emotional_arc', ''),
         ]
         
         # Add detailed scores for each rubric parameter
@@ -505,12 +619,25 @@ def log_to_google_sheet(call_data: Dict[str, Any], analysis_data: Dict[str, Any]
         # Add transcript at the end
         row.append(analysis_data.get('transcript', ''))
         
-        sheet.append_row(row, value_input_option='USER_ENTERED')
-        logger.info(f"✅ Logged to Google Sheet: {call_data.get('Sid', 'Unknown')}")
+        # FIX: Add retry logic and better error handling
+        max_retries = 3
+        for retry in range(max_retries):
+            try:
+                sheet.append_row(row, value_input_option='USER_ENTERED')
+                logger.info(f"✅ Logged to Google Sheet: {call_data.get('Sid', 'Unknown')}")
+                return
+            except Exception as append_error:
+                logger.warning(f"Attempt {retry+1} to append row failed: {append_error}")
+                if retry == max_retries - 1:
+                    raise
+                time.sleep(2)
         
     except Exception as e:
-        logger.error(f"Error logging to sheet: {e}")
+        logger.error(f"❌ Error logging to sheet: {e}")
+        logger.error(f"Sheet ID: {SHEET_ID}")
+        logger.error(f"Call SID: {call_data.get('Sid', 'Unknown')}")
         traceback.print_exc()
+        raise  # Re-raise to mark call as failed
 
 
 def process_call(call: Dict[str, Any], kb_context: str) -> bool:
@@ -521,7 +648,7 @@ def process_call(call: Dict[str, Any], kb_context: str) -> bool:
         logger.info(f"Processing Call SID: {call_sid}")
         logger.info(f"{'='*60}")
         
-        # Get recording URL (prefer PreSignedRecordingUrl if available)
+        # Get recording URL
         recording_url = call.get('PreSignedRecordingUrl') or call.get('RecordingUrl')
         
         if not recording_url:
@@ -529,7 +656,7 @@ def process_call(call: Dict[str, Any], kb_context: str) -> bool:
             return False
         
         # Step 1: Transcribe
-        logger.info("Step 1/3: Transcribing audio...")
+        logger.info("Step 1/4: Transcribing audio...")
         raw_transcript, languages, tone_data = transcribe_audio(recording_url)
         
         if not raw_transcript:
@@ -537,11 +664,11 @@ def process_call(call: Dict[str, Any], kb_context: str) -> bool:
             return False
         
         # Step 2: Polish
-        logger.info("Step 2/3: Polishing transcript...")
+        logger.info("Step 2/4: Polishing transcript...")
         polished_transcript = polish_transcript(raw_transcript, kb_context)
         
         # Step 3: Analyze
-        logger.info("Step 3/3: Analyzing call quality...")
+        logger.info("Step 3/4: Analyzing call quality...")
         evaluation, total_score, performance_level = analyze_call(polished_transcript, kb_context)
         
         # Prepare comprehensive analysis data
@@ -566,7 +693,7 @@ def process_call(call: Dict[str, Any], kb_context: str) -> bool:
         return True
         
     except Exception as e:
-        logger.error(f"Error processing call {call.get('Sid', 'Unknown')}: {e}")
+        logger.error(f"❌ Error processing call {call.get('Sid', 'Unknown')}: {e}")
         traceback.print_exc()
         return False
 
@@ -587,6 +714,27 @@ def main():
     kb_context = get_kb_context()
     logger.info(f"✅ KB loaded: {len(kb_context)} characters")
     
+    # FIX: Get already processed calls from sheet
+    logger.info("\n📋 Checking already processed calls...")
+    try:
+        creds_dict = json.loads(GSPREAD_CREDENTIALS)
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive"
+        ]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        client = gspread.authorize(creds)
+        sheet = client.open_by_key(SHEET_ID).sheet1
+        
+        # Ensure headers are set up
+        ensure_sheet_headers(sheet)
+        
+        # Get already processed calls
+        processed_sids = get_already_processed_calls(sheet)
+    except Exception as e:
+        logger.warning(f"Could not access sheet to check processed calls: {e}")
+        processed_sids = set()
+    
     # Fetch recordings from last hour
     logger.info("\n📞 Fetching recordings from last hour...")
     calls = fetch_last_hour_recordings()
@@ -595,14 +743,23 @@ def main():
         logger.info("ℹ️  No recordings found in the last hour")
         return
     
-    logger.info(f"\n📊 Found {len(calls)} recordings to process\n")
+    # FIX: Filter out already processed calls
+    unprocessed_calls = [call for call in calls if call.get('Sid') not in processed_sids]
+    
+    logger.info(f"\n📊 Total recordings found: {len(calls)}")
+    logger.info(f"📊 Already processed: {len(calls) - len(unprocessed_calls)}")
+    logger.info(f"📊 New recordings to process: {len(unprocessed_calls)}\n")
+    
+    if not unprocessed_calls:
+        logger.info("✅ All calls already processed. Nothing to do.")
+        return
     
     # Process each call
     successful = 0
     failed = 0
     
-    for i, call in enumerate(calls, 1):
-        logger.info(f"\n--- Processing Call {i}/{len(calls)} ---")
+    for i, call in enumerate(unprocessed_calls, 1):
+        logger.info(f"\n--- Processing Call {i}/{len(unprocessed_calls)} ---")
         
         if process_call(call, kb_context):
             successful += 1
@@ -610,7 +767,7 @@ def main():
             failed += 1
         
         # Rate limiting: wait between calls
-        if i < len(calls):
+        if i < len(unprocessed_calls):
             logger.info("⏳ Waiting 10 seconds before next call...")
             time.sleep(10)
     
@@ -618,14 +775,15 @@ def main():
     logger.info("\n" + "="*80)
     logger.info("📊 EXECUTION SUMMARY")
     logger.info("="*80)
-    logger.info(f"Total Calls Processed: {len(calls)}")
-    logger.info(f"✅ Successful: {successful}")
+    logger.info(f"Total New Calls Found: {len(unprocessed_calls)}")
+    logger.info(f"✅ Successfully Processed: {successful}")
     logger.info(f"❌ Failed: {failed}")
-    logger.info(f"Success Rate: {(successful/len(calls)*100):.1f}%")
+    if unprocessed_calls:
+        logger.info(f"Success Rate: {(successful/len(unprocessed_calls)*100):.1f}%")
     logger.info("="*80 + "\n")
     
     if failed > 0:
-        sys.exit(1)  # Exit with error code if any failures
+        sys.exit(1)
 
 
 if __name__ == "__main__":
