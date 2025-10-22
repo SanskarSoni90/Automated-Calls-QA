@@ -48,6 +48,25 @@ EXOTEL_SUBDOMAIN = "api.exotel.com"
 # Google Sheet Configuration
 SHEET_NAME = "Professional QA Analysis Log"
 
+# Timezone Configuration (change this to your timezone)
+# Common options:
+# - IST (India): UTC+5:30 -> timedelta(hours=5, minutes=30)
+# - EST (US East): UTC-5 -> timedelta(hours=-5)
+# - PST (US West): UTC-8 -> timedelta(hours=-8)
+# - GMT (UK): UTC+0 -> timedelta(hours=0)
+TIMEZONE_OFFSET = timedelta(hours=5, minutes=30)  # IST by default
+TIMEZONE_NAME = "IST"  # Timezone name for display
+
+def get_local_time() -> datetime:
+    """Get current time in configured timezone"""
+    from datetime import timezone
+    LOCAL_TZ = timezone(TIMEZONE_OFFSET)
+    return datetime.now(LOCAL_TZ)
+
+def format_ist_timestamp(dt: datetime) -> str:
+    """Format datetime to string with timezone indicator"""
+    return dt.strftime('%Y-%m-%d %H:%M:%S') + f' {TIMEZONE_NAME}'
+
 # Initialize AI services
 if ASSEMBLYAI_API_KEY:
     aai.settings.api_key = ASSEMBLYAI_API_KEY
@@ -133,14 +152,16 @@ def get_kb_context() -> str:
 def fetch_last_hour_recordings() -> List[Dict[str, Any]]:
     """Fetch all recordings from the last hour"""
     try:
-        # Calculate time range (last hour)
-        end_time = datetime.utcnow()
+        # Get current local time and calculate time range
+        end_time = get_local_time()
         start_time = end_time - timedelta(hours=1)
         
+        # Format for Exotel API
         start_str = start_time.strftime('%Y-%m-%d %H:%M:%S')
         end_str = end_time.strftime('%Y-%m-%d %H:%M:%S')
         
-        logger.info(f"Fetching recordings from {start_str} to {end_str}")
+        logger.info(f"Current {TIMEZONE_NAME} time: {format_ist_timestamp(end_time)}")
+        logger.info(f"Fetching recordings from {format_ist_timestamp(start_time)} to {format_ist_timestamp(end_time)}")
         
         url = f"https://{EXOTEL_SUBDOMAIN}/v1/Accounts/{EXOTEL_ACCOUNT_SID}/Calls.json"
         
@@ -427,13 +448,32 @@ def log_to_google_sheet(call_data: Dict[str, Any], analysis_data: Dict[str, Any]
         
         sheet = client.open(SHEET_NAME).sheet1
         
-        # Prepare comprehensive row data
+        # Get current local time for analysis timestamp
+        current_time = get_local_time()
+        
+        # Format Exotel timestamps to IST
+        def convert_to_ist(exotel_timestamp):
+            """Convert Exotel timestamp to IST with proper formatting"""
+            if not exotel_timestamp or exotel_timestamp == 'Unknown':
+                return 'N/A'
+            
+            try:
+                # Exotel returns timestamps - parse and add timezone label
+                dt = datetime.strptime(str(exotel_timestamp).strip(), '%Y-%m-%d %H:%M:%S')
+                return dt.strftime('%Y-%m-%d %H:%M:%S') + f' {TIMEZONE_NAME}'
+                
+            except Exception as e:
+                logger.warning(f"Timestamp conversion failed for {exotel_timestamp}: {e}")
+                # Return as-is with timezone label
+                return str(exotel_timestamp) + f' {TIMEZONE_NAME}'
+        
+        # Prepare comprehensive row data with IST timestamps
         row = [
-            datetime.now().strftime('%Y-%m-%d %H:%M:%S'),  # Analysis Timestamp
+            format_ist_timestamp(current_time),  # Analysis Timestamp (IST)
             call_data.get('Sid', ''),  # Call SID
-            call_data.get('DateCreated', ''),  # Call Date
-            call_data.get('StartTime', ''),  # Start Time
-            call_data.get('EndTime', ''),  # End Time
+            convert_to_ist(call_data.get('DateCreated', '')),  # Call Date (IST)
+            convert_to_ist(call_data.get('StartTime', '')),  # Start Time (IST)
+            convert_to_ist(call_data.get('EndTime', '')),  # End Time (IST)
             call_data.get('Duration', ''),  # Duration (seconds)
             call_data.get('From', {}).get('PhoneNumber', '') if isinstance(call_data.get('From'), dict) else call_data.get('From', ''),
             call_data.get('To', {}).get('PhoneNumber', '') if isinstance(call_data.get('To'), dict) else call_data.get('To', ''),
