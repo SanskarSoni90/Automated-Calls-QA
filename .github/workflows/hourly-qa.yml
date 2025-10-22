@@ -1,0 +1,55 @@
+name: Hourly Call QA Analysis
+
+on:
+  schedule:
+    # Run every hour at minute 5 (e.g., 1:05, 2:05, 3:05, etc.)
+    - cron: '5 * * * *'
+  
+  # Allow manual triggering for testing
+  workflow_dispatch:
+
+jobs:
+  qa-analysis:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55  # Prevent exceeding 1 hour
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install assemblyai openai gspread google-auth google-api-python-client requests python-dateutil
+      
+      - name: Run QA Engine
+        env:
+          ASSEMBLYAI_API_KEY: ${{ secrets.ASSEMBLYAI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          EXOTEL_ACCOUNT_SID: ${{ secrets.EXOTEL_ACCOUNT_SID }}
+          EXOTEL_API_KEY: ${{ secrets.EXOTEL_API_KEY }}
+          EXOTEL_API_TOKEN: ${{ secrets.EXOTEL_API_TOKEN }}
+          GSPREAD_CREDENTIALS: ${{ secrets.GSPREAD_CREDENTIALS }}
+        run: |
+          python automated_qa_engine.py
+      
+      - name: Upload logs as artifact
+        if: always()  # Upload logs even if job fails
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-logs-${{ github.run_number }}
+          path: qa_engine.log
+          retention-days: 30
+      
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "❌ QA Engine execution failed. Check logs for details."
+          echo "Run number: ${{ github.run_number }}"
+          echo "Timestamp: $(date)"
