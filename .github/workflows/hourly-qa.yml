@@ -2,8 +2,11 @@ name: Hourly Call QA Analysis
 
 on:
   schedule:
-    # Run every hour at minute 5 (e.g., 1:05, 2:05, 3:05, etc.)
-    - cron: '5 * * * *'
+    # Run every hour at :05 IST (which is :35 UTC)
+    # IST = UTC + 5:30, so to run at X:05 IST, we need (X-5):35 UTC
+    # This runs at: 12:35 AM, 1:35 AM, 2:35 AM... in UTC
+    # Which equals: 6:05 AM, 7:05 AM, 8:05 AM... in IST
+    - cron: '35 * * * *'
   
   # Allow manual triggering for testing
   workflow_dispatch:
